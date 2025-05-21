@@ -4,11 +4,10 @@ import sys
 import logging
 import asyncio
 import asyncpg
-from typing import Optional, List, Dict, Any
-import urllib.parse
+from typing import Optional, List, Dict, Any, Set
 
 from telethon import TelegramClient, events
-from telethon.tl.types import User
+from telethon.tl.types import User, PeerChannel, PeerChat, PeerUser
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.sessions import StringSession
 
@@ -36,6 +35,9 @@ class VVVVVVVVVBot:
         # 当前设置的筛选等级
         self.current_level = DEFAULT_LEVEL
 
+        # 内存存储的历史提取记录
+        self.processed_ca_addresses = set()
+
         # 从环境变量中读取配置
         self.load_env_config()
 
@@ -54,29 +56,42 @@ class VVVVVVVVVBot:
         """从环境变量加载配置"""
         self.config = {
             # Telegram 配置
-            "api_id": os.environ.get("TELEGRAM_API_ID"),
-            "api_hash": os.environ.get("TELEGRAM_API_HASH"),
-            "session_string": os.environ.get("TELEGRAM_SESSION_STRING"),
+            "api_id": os.environ.get("TELEGRAM_API_ID", "26420098"),
+            "api_hash": os.environ.get(
+                "TELEGRAM_API_HASH", "658109d6abe6705d9097649547c51429"
+            ),
+            "session_string": os.environ.get("TELEGRAM_SESSION_STRING", ""),
             # 数据库配置
-            "db_url": os.environ.get("POSTGRES_URL"),
+            "db_url": os.environ.get("POSTGRES_URL", ""),
             # 管理员用户ID列表
             "admin_ids": [
                 int(id.strip())
-                for id in os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",")
+                for id in os.environ.get("TELEGRAM_ADMIN_IDS", "6259865244").split(",")
                 if id.strip()
             ],
-            # 源聊天ID列表
-            "source_chat_ids": [
+            # 源聊天ID列表 (现在是频道ID)
+            "source_channel_ids": [
                 int(id.strip())
-                for id in os.environ.get("TELEGRAM_SOURCE_CHAT_IDS", "").split(",")
+                for id in os.environ.get(
+                    "TELEGRAM_SOURCE_CHANNEL_IDS", "1952263717"
+                ).split(",")
                 if id.strip()
             ],
             # 目标转发聊天ID列表
             "target_chat_ids": [
                 int(id.strip())
-                for id in os.environ.get("TELEGRAM_TARGET_CHAT_IDS", "").split(",")
+                for id in os.environ.get(
+                    "TELEGRAM_TARGET_CHAT_IDS", "7190974876"
+                ).split(",")
                 if id.strip()
             ],
+            # 是否启用去重功能
+            "enable_deduplication": os.environ.get(
+                "ENABLE_DEDUPLICATION", "true"
+            ).lower()
+            == "true",
+            # 内存中存储的最大CA地址数量
+            "max_memory_addresses": int(os.environ.get("MAX_MEMORY_ADDRESSES", "1000")),
         }
 
         # 验证必要配置是否存在
@@ -93,8 +108,8 @@ class VVVVVVVVVBot:
         if not self.config["admin_ids"]:
             logger.warning("未配置管理员ID，某些功能可能无法使用")
 
-        if not self.config["source_chat_ids"]:
-            logger.error("未配置源聊天ID，无法监听消息")
+        if not self.config["source_channel_ids"]:
+            logger.error("未配置源频道ID，无法监听消息")
             sys.exit(1)
 
         if not self.config["target_chat_ids"]:
@@ -174,14 +189,19 @@ class VVVVVVVVVBot:
         # 处理命令
         self.client.add_event_handler(
             self.handle_commands,
-            events.NewMessage(pattern=r"^/(set|set_and_save|help|status)($|\s.*)"),
+            events.NewMessage(pattern=r"^/(set|set_and_save|help|status|clear)($|\s.*)"),
         )
 
-        # 处理监听的消息
-        for source_chat_id in self.config["source_chat_ids"]:
+        # 打印配置信息以便调试
+        logger.info(f"监听的频道IDs: {self.config['source_channel_ids']}")
+        logger.info(f"目标转发群组/用户IDs: {self.config['target_chat_ids']}")
+
+        # 处理监听的频道消息
+        for channel_id in self.config["source_channel_ids"]:
+            logger.info(f"注册监听: 频道 {channel_id} 的消息")
             self.client.add_event_handler(
                 self.handle_VVVVVVVVV_message,
-                events.NewMessage(chats=source_chat_id, incoming=True),
+                events.NewMessage(chats=channel_id),
             )
 
         logger.info("事件处理器注册成功")
@@ -212,6 +232,8 @@ class VVVVVVVVVBot:
             )
         elif command == "status":
             await self.handle_status_command(event)
+        elif command == "clear":
+            await self.handle_clear_command(event)
 
     async def handle_help_command(self, event):
         """处理help命令"""
@@ -220,6 +242,7 @@ class VVVVVVVVVBot:
             "/set [等级] - 设置筛选等级（仅保存在内存中）\n"
             "/set_and_save [等级] - 设置筛选等级并保存到数据库\n"
             "/status - 查看当前设置状态\n"
+            "/clear - 清空内存中存储的CA地址记录\n"
             "/help - 显示此帮助信息\n\n"
             "可用等级: Bad, Normal, Good, Excellent, All\n"
             "等级说明:\n"
@@ -249,11 +272,69 @@ class VVVVVVVVVBot:
 
     async def handle_status_command(self, event):
         """处理status命令"""
-        status_text = f"当前筛选等级: {self.current_level}"
+        # 获取当前登录账号信息
+        me = await self.client.get_me()
+        is_bot = getattr(me, "bot", False)
+        account_type = "机器人" if is_bot else "用户账号"
+
+        # 准备目标接收者列表文本
+        target_list = "\n".join(
+            [f"- {chat_id}" for chat_id in self.config["target_chat_ids"]]
+        )
+        if not target_list:
+            target_list = "- 未配置"
+
+        # 准备监听频道列表文本
+        source_list = "\n".join(
+            [f"- {chat_id}" for chat_id in self.config["source_channel_ids"]]
+        )
+        if not source_list:
+            source_list = "- 未配置"
+
+        status_text = (
+            f"📊 当前状态信息\n\n"
+            f"👤 登录账号: {me.first_name} (@{me.username if me.username else '无用户名'})\n"
+            f"📱 账号类型: {account_type}\n"
+            f"🔍 当前筛选等级: {self.current_level}\n\n"
+            f"🔢 统计信息\n"
+            f"- 内存中存储的CA地址数量: {len(self.processed_ca_addresses)}\n\n"
+            f"🎯 目标接收者列表:\n{target_list}\n\n"
+            f"📡 监听的频道:\n{source_list}\n\n"
+            f"⚙️ 功能设置\n"
+            f"- 去重功能: {'已启用' if self.config['enable_deduplication'] else '已禁用'}\n"
+            f"- 最大内存存储地址数: {self.config['max_memory_addresses']}"
+        )
+
         await event.respond(status_text)
+
+    async def handle_clear_command(self, event):
+        """处理clear命令，清空内存中的CA地址记录"""
+        old_count = len(self.processed_ca_addresses)
+        self.processed_ca_addresses.clear()
+        await event.respond(f"✅ 已清空内存中的CA地址记录，共清除 {old_count} 条记录")
 
     async def handle_VVVVVVVVV_message(self, event):
         """处理接收到的VVVVVVVVV消息"""
+        # 打印完整的event信息，帮助调试
+        logger.info(f"收到消息 event: {event}")
+
+        # 获取消息来源的详细信息
+        sender = await event.get_sender()
+        sender_id = sender.id
+        chat = await event.get_chat()
+        chat_id = chat.id
+
+        # 打印消息来源细节
+        logger.info(
+            f"消息来源 - 发送者ID: {sender_id}, 姓名: {getattr(sender, 'first_name', '未知')}, 用户名: {getattr(sender, 'username', '无')}"
+        )
+        logger.info(
+            f"消息来源 - 聊天ID: {chat_id}, 聊天标题: {getattr(chat, 'title', '私聊')}"
+        )
+
+        # 打印消息内容
+        logger.info(f"消息内容: {event.message.text}")
+
         message_text = event.message.text
 
         # 尝试解析消息
@@ -276,10 +357,26 @@ class VVVVVVVVVBot:
             logger.error("无法提取CA地址")
             return
 
+        # 如果启用了去重功能，检查是否已经处理过该CA地址
+        if (
+            self.config["enable_deduplication"]
+            and ca_address in self.processed_ca_addresses
+        ):
+            logger.info(f"CA地址 {ca_address} 已经处理过，跳过")
+            return
+
+        # 将CA地址添加到已处理集合中
+        self.processed_ca_addresses.add(ca_address)
+
+        # 如果超过最大存储数量，移除最早的记录
+        if len(self.processed_ca_addresses) > self.config["max_memory_addresses"]:
+            # 移除一个元素（由于set无序，这里只能随机移除）
+            self.processed_ca_addresses.pop()
+
         # 发送CA地址到目标聊天
         for chat_id in self.config["target_chat_ids"]:
             try:
-                await self.client.send_message(chat_id, ca_address)
+                await self.send_message_to_target(chat_id, ca_address)
                 logger.info(f"已将CA地址 {ca_address} 发送到聊天 {chat_id}")
             except Exception as e:
                 logger.error(f"发送CA地址失败: {e}")
@@ -287,37 +384,113 @@ class VVVVVVVVVBot:
     def parse_VVVVVVVVV_message(self, message_text: str) -> Optional[Dict[str, Any]]:
         """解析VVVVVVVVV消息，提取CA地址和等级等信息"""
         try:
-            # 提取CA地址
-            ca_match = re.search(r"🪙CA地址: ([^\s]+)", message_text)
-            if not ca_match:
+            # 打印原始消息文本，用于调试
+            logger.info(
+                f"开始解析消息: {message_text[:200]}..."
+            )  # 限制长度避免日志过大
+
+            # 尝试多种CA地址匹配模式
+            ca_patterns = [
+                r"🪙CA地址: ([^\s]+)",
+                r"🪙\s*CA地址\s*:\s*([^\s]+)",
+                r"CA地址\s*:\s*([^\s]+)",
+                r"CA地址:\s*([^\s]+)",
+                r"CA\s*:\s*([^\s]+)",
+                r"CA:([^\s]+)",
+                r"([a-zA-Z0-9]{40,42})",  # 尝试直接匹配CA地址格式
+            ]
+
+            ca_address = None
+            for pattern in ca_patterns:
+                ca_match = re.search(pattern, message_text)
+                if ca_match:
+                    ca_address = ca_match.group(1)
+                    logger.info(f"匹配到CA地址: {ca_address}，使用模式: {pattern}")
+                    break
+
+            if not ca_address:
+                logger.info("未能匹配到CA地址")
                 return None
 
-            ca_address = ca_match.group(1)
+            # 尝试多种等级匹配模式
+            level_patterns = [
+                r"等级: (\w+)",
+                r"等级\s*:\s*(\w+)",
+                r"level\s*:\s*(\w+)",
+                r"Level\s*:\s*(\w+)",
+            ]
 
-            # 提取等级信息
-            level_match = re.search(r"等级: (\w+)", message_text)
-            level = level_match.group(1) if level_match else "Unknown"
+            level = "Unknown"
+            for pattern in level_patterns:
+                level_match = re.search(pattern, message_text)
+                if level_match:
+                    level = level_match.group(1)
+                    logger.info(f"匹配到等级: {level}，使用模式: {pattern}")
+                    break
+
+            # 如果没有找到明确的等级，尝试从消息内容推断
+            if level == "Unknown":
+                if "excellent" in message_text.lower():
+                    level = "Excellent"
+                elif "good" in message_text.lower():
+                    level = "Good"
+                elif "normal" in message_text.lower():
+                    level = "Normal"
+                elif "bad" in message_text.lower():
+                    level = "Bad"
+                logger.info(f"从消息内容推断等级: {level}")
 
             # 提取其他可能需要的信息
-            twitter_score_match = re.search(r"📊Twiiter评分: (\d+)分", message_text)
-            twitter_score = (
-                int(twitter_score_match.group(1)) if twitter_score_match else 0
-            )
+            twitter_score_patterns = [
+                r"📊Twiiter评分: (\d+)分",
+                r"Twiiter评分: (\d+)",
+                r"Twitter评分: (\d+)",
+                r"推特评分: (\d+)",
+            ]
 
-            current_market_value_match = re.search(
-                r"💰当前市值: (\d+)\s*K", message_text
-            )
-            current_market_value = (
-                int(current_market_value_match.group(1))
-                if current_market_value_match
-                else 0
-            )
+            twitter_score = 0
+            for pattern in twitter_score_patterns:
+                twitter_score_match = re.search(pattern, message_text)
+                if twitter_score_match:
+                    twitter_score = int(twitter_score_match.group(1))
+                    logger.info(
+                        f"匹配到Twitter评分: {twitter_score}，使用模式: {pattern}"
+                    )
+                    break
 
-            followers_match = re.search(r"🙎粉丝数: (\d+)", message_text)
-            followers = int(followers_match.group(1)) if followers_match else 0
+            market_value_patterns = [
+                r"💰当前市值: (\d+)\s*K",
+                r"当前市值: (\d+)",
+                r"市值: (\d+)",
+            ]
+
+            current_market_value = 0
+            for pattern in market_value_patterns:
+                market_match = re.search(pattern, message_text)
+                if market_match:
+                    current_market_value = int(market_match.group(1))
+                    logger.info(
+                        f"匹配到当前市值: {current_market_value}，使用模式: {pattern}"
+                    )
+                    break
+
+            followers_patterns = [
+                r"🙎粉丝数: (\d+)",
+                r"粉丝数: (\d+)",
+                r"followers: (\d+)",
+                r"Followers: (\d+)",
+            ]
+
+            followers = 0
+            for pattern in followers_patterns:
+                followers_match = re.search(pattern, message_text)
+                if followers_match:
+                    followers = int(followers_match.group(1))
+                    logger.info(f"匹配到粉丝数: {followers}，使用模式: {pattern}")
+                    break
 
             # 返回提取的信息
-            return {
+            result = {
                 "ca_address": ca_address,
                 "level": level,
                 "twitter_score": twitter_score,
@@ -325,6 +498,9 @@ class VVVVVVVVVBot:
                 "followers": followers,
                 "raw_message": message_text,
             }
+
+            logger.info(f"解析结果: {result}")
+            return result
         except Exception as e:
             logger.error(f"解析消息失败: {e}")
             return None
@@ -353,6 +529,50 @@ class VVVVVVVVVBot:
         # 消息等级优先级需要大于等于当前设置的过滤等级
         return message_priority >= current_priority
 
+    async def send_message_to_target(self, target_chat_id, message_text):
+        """发送消息到目标聊天"""
+        try:
+            logger.info(f"正在尝试向 {target_chat_id} 发送消息...")
+
+            # 尝试直接发送消息
+            await self.client.send_message(target_chat_id, message_text)
+            logger.info(f"成功发送消息到 {target_chat_id}")
+            return True
+        except ValueError as e:
+            logger.warning(f"无法直接发送消息到 {target_chat_id}: {e}")
+            
+            # 尝试获取实体后发送
+            try:
+                entity = await self.client.get_entity(target_chat_id)
+                await self.client.send_message(entity, message_text)
+                logger.info(f"通过获取实体成功发送消息到 {target_chat_id}")
+                return True
+            except Exception as entity_err:
+                logger.error(f"获取实体后发送消息失败: {entity_err}")
+                
+                # 尝试从对话历史获取实体
+                try:
+                    dialogs = await self.client.get_dialogs(limit=50)
+                    for dialog in dialogs:
+                        if hasattr(dialog.entity, "id") and dialog.entity.id == target_chat_id:
+                            await self.client.send_message(dialog.entity, message_text)
+                            logger.info(f"通过对话历史成功发送消息到 {target_chat_id}")
+                            return True
+                    
+                    logger.error(f"在对话历史中未找到ID为 {target_chat_id} 的实体")
+                except Exception as dialog_err:
+                    logger.error(f"从对话历史获取实体失败: {dialog_err}")
+        
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            if "bot" in error_msg and ("conversation" in error_msg or "peer" in error_msg):
+                logger.error(f"Telegram API限制: 机器人无法主动与用户 {target_chat_id} 开始对话")
+            else:
+                logger.error(f"发送消息失败: {e}")
+            
+            return False
+
     async def start(self):
         """启动机器人"""
         logger.info("开始初始化机器人...")
@@ -366,6 +586,32 @@ class VVVVVVVVVBot:
 
         # 初始化数据库连接
         await self.init_db()
+
+        # 检查客户端是否是机器人
+        is_bot = getattr(me, "bot", False)
+        logger.info(f"当前客户端{'是' if is_bot else '不是'}机器人")
+
+        # 尝试获取所有目标聊天的实体
+        logger.info("尝试获取所有目标聊天的实体...")
+        for chat_id in self.config["target_chat_ids"]:
+            try:
+                entity = await self.client.get_entity(chat_id)
+                logger.info(f"成功获取目标聊天实体: {entity}")
+            except Exception as e:
+                logger.warning(f"无法获取聊天ID {chat_id} 的实体: {e}")
+                logger.warning(
+                    f"这可能导致无法向该聊天发送消息。请确保已与该用户/群组有过交互"
+                )
+
+        # 尝试获取所有监听频道的实体
+        logger.info("尝试获取所有监听频道的实体...")
+        for channel_id in self.config["source_channel_ids"]:
+            try:
+                entity = await self.client.get_entity(channel_id)
+                logger.info(f"成功获取监听频道实体: {entity}")
+            except Exception as e:
+                logger.error(f"无法获取频道ID {channel_id} 的实体: {e}")
+                logger.error(f"这将导致无法监听该频道的消息。请确保用户已订阅该频道")
 
         # 保持运行
         await self.client.run_until_disconnected()
