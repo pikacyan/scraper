@@ -3,9 +3,7 @@ import os
 import sys
 import logging
 import asyncio
-import asyncpg
 from typing import Optional, List, Dict, Any
-import urllib.parse
 
 from telethon import TelegramClient, events
 from telethon.tl.types import User
@@ -30,9 +28,6 @@ DEFAULT_LEVEL = "Normal"  # 默认等级
 
 class VVVVVVVVVBot:
     def __init__(self):
-        # 初始化数据库连接池
-        self.pool = None
-
         # 当前设置的筛选等级
         self.current_level = DEFAULT_LEVEL
 
@@ -57,8 +52,6 @@ class VVVVVVVVVBot:
             "api_id": os.environ.get("TELEGRAM_API_ID"),
             "api_hash": os.environ.get("TELEGRAM_API_HASH"),
             "session_string": os.environ.get("TELEGRAM_SESSION_STRING"),
-            # 数据库配置
-            "db_url": os.environ.get("POSTGRES_URL"),
             # 管理员用户ID列表
             "admin_ids": [
                 int(id.strip())
@@ -81,7 +74,7 @@ class VVVVVVVVVBot:
 
         # 验证必要配置是否存在
         missing_configs = []
-        for key in ["api_id", "api_hash", "session_string", "db_url"]:
+        for key in ["api_id", "api_hash", "session_string"]:
             if not self.config.get(key):
                 missing_configs.append(key)
 
@@ -103,78 +96,12 @@ class VVVVVVVVVBot:
 
         logger.info("从环境变量加载配置成功")
 
-    async def init_db(self):
-        """初始化数据库连接"""
-        try:
-            # 使用URL连接字符串
-            self.pool = await asyncpg.create_pool(self.config["db_url"])
-            logger.info("使用环境变量中的URL创建数据库连接池")
-
-            # 创建表（如果不存在）
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS settings (
-                        key TEXT PRIMARY KEY,
-                        value TEXT
-                    )
-                    """
-                )
-
-            # 从数据库加载设置
-            await self.load_settings_from_db()
-
-            logger.info("数据库连接初始化成功")
-        except Exception as e:
-            logger.error(f"数据库连接失败: {e}")
-            sys.exit(1)
-
-    async def load_settings_from_db(self):
-        """从数据库加载设置"""
-        try:
-            async with self.pool.acquire() as conn:
-                # 获取保存的等级设置
-                level_record = await conn.fetchrow(
-                    "SELECT value FROM settings WHERE key = 'filter_level'"
-                )
-
-                if level_record:
-                    saved_level = level_record["value"]
-                    if saved_level in LEVELS:
-                        self.current_level = saved_level
-                        logger.info(f"从数据库加载等级设置: {self.current_level}")
-                    else:
-                        logger.warning(
-                            f"数据库中的等级设置无效: {saved_level}，使用默认值: {DEFAULT_LEVEL}"
-                        )
-                else:
-                    logger.info(f"数据库中未找到等级设置，使用默认值: {DEFAULT_LEVEL}")
-        except Exception as e:
-            logger.error(f"从数据库加载设置失败: {e}")
-
-    async def save_settings_to_db(self):
-        """保存设置到数据库"""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO settings (key, value) 
-                    VALUES ('filter_level', $1)
-                    ON CONFLICT (key) DO UPDATE
-                    SET value = $1
-                    """,
-                    self.current_level,
-                )
-                logger.info(f"已将等级设置 {self.current_level} 保存到数据库")
-        except Exception as e:
-            logger.error(f"保存设置到数据库失败: {e}")
-
     def register_handlers(self):
         """注册消息处理器"""
         # 处理命令
         self.client.add_event_handler(
             self.handle_commands,
-            events.NewMessage(pattern=r"^/(set|set_and_save|help|status)($|\s.*)"),
+            events.NewMessage(pattern=r"^/(set|help|status)($|\s.*)"),
         )
 
         # 处理监听的消息
@@ -201,15 +128,13 @@ class VVVVVVVVVBot:
 
         if command == "help":
             await self.handle_help_command(event)
-        elif command in ["set", "set_and_save"]:
+        elif command == "set":
             if len(command_parts) < 2:
                 await event.respond("❌ 请指定要设置的等级\n例如: /set Normal")
                 return
 
             level = command_parts[1]
-            await self.handle_set_command(
-                event, level, save_to_db=(command == "set_and_save")
-            )
+            await self.handle_set_command(event, level)
         elif command == "status":
             await self.handle_status_command(event)
 
@@ -217,8 +142,7 @@ class VVVVVVVVVBot:
         """处理help命令"""
         help_text = (
             "🤖 VVVVVVVVV监测机器人使用帮助:\n\n"
-            "/set [等级] - 设置筛选等级（仅保存在内存中）\n"
-            "/set_and_save [等级] - 设置筛选等级并保存到数据库\n"
+            "/set [等级] - 设置筛选等级\n"
             "/status - 查看当前设置状态\n"
             "/help - 显示此帮助信息\n\n"
             "可用等级: Bad, Normal, Good, Excellent, All\n"
@@ -231,8 +155,8 @@ class VVVVVVVVVBot:
         )
         await event.respond(help_text)
 
-    async def handle_set_command(self, event, level, save_to_db=False):
-        """处理set和set_and_save命令"""
+    async def handle_set_command(self, event, level):
+        """处理set命令"""
         if level not in LEVELS:
             await event.respond(
                 f"❌ 无效的等级: {level}\n可用等级: {', '.join(LEVELS)}"
@@ -240,12 +164,7 @@ class VVVVVVVVVBot:
             return
 
         self.current_level = level
-
-        if save_to_db:
-            await self.save_settings_to_db()
-            await event.respond(f"✅ 已设置筛选等级为 {level} 并保存到数据库")
-        else:
-            await event.respond(f"✅ 已设置筛选等级为 {level}（仅保存在内存中）")
+        await event.respond(f"✅ 已设置筛选等级为 {level}")
 
     async def handle_status_command(self, event):
         """处理status命令"""
@@ -360,9 +279,6 @@ class VVVVVVVVVBot:
             f"已登录，用户: {me.first_name} (@{me.username if me.username else '无用户名'})"
         )
 
-        # 初始化数据库连接
-        await self.init_db()
-
         # 保持运行
         await self.client.run_until_disconnected()
 
@@ -370,12 +286,7 @@ class VVVVVVVVVBot:
 async def main():
     """主函数"""
     # 检查必要的环境变量
-    required_envs = [
-        "TELEGRAM_API_ID",
-        "TELEGRAM_API_HASH",
-        "TELEGRAM_SESSION_STRING",
-        "POSTGRES_URL",
-    ]
+    required_envs = ["TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION_STRING"]
     missing_envs = [env for env in required_envs if not os.environ.get(env)]
 
     if missing_envs:
