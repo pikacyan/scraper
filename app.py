@@ -21,13 +21,13 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
-logger = logging.getLogger("pumpbot")
+logger = logging.getLogger("VVVVVVVVVbot")
 
 # 定义等级枚举
 LEVELS = ["Bad", "Normal", "Good", "Excellent", "All"]
 DEFAULT_LEVEL = "Normal"  # 默认等级
 
-class PumpBot:
+class VVVVVVVVVBot:
     def __init__(self):
         # 初始化数据库连接池
         self.pool = None
@@ -171,7 +171,7 @@ class PumpBot:
         # 处理监听的消息
         for source_chat_id in self.config["source_chat_ids"]:
             self.client.add_event_handler(
-                self.handle_pump_message,
+                self.handle_VVVVVVVVV_message,
                 events.NewMessage(chats=source_chat_id, incoming=True),
             )
         
@@ -207,7 +207,7 @@ class PumpBot:
     async def handle_help_command(self, event):
         """处理help命令"""
         help_text = (
-            "🤖 Pump监测机器人使用帮助:\n\n"
+            "🤖 VVVVVVVVV监测机器人使用帮助:\n\n"
             "/set [等级] - 设置筛选等级（仅保存在内存中）\n"
             "/set_and_save [等级] - 设置筛选等级并保存到数据库\n"
             "/status - 查看当前设置状态\n"
@@ -243,21 +243,21 @@ class PumpBot:
         status_text = f"当前筛选等级: {self.current_level}"
         await event.respond(status_text)
     
-    async def handle_pump_message(self, event):
-        """处理接收到的pump消息"""
+    async def handle_VVVVVVVVV_message(self, event):
+        """处理接收到的VVVVVVVVV消息"""
         message_text = event.message.text
         
         # 尝试解析消息
-        pump_data = self.parse_pump_message(message_text)
+        VVVVVVVVV_data = self.parse_VVVVVVVVV_message(message_text)
         
-        if not pump_data:
-            logger.debug("收到的消息不是有效的pump消息")
+        if not VVVVVVVVV_data:
+            logger.debug("收到的消息不是有效的VVVVVVVVV消息")
             return
         
         # 检查消息等级是否符合筛选条件
-        if not self.should_forward_by_level(pump_data):
+        if not self.should_forward_by_level(VVVVVVVVV_data):
             logger.info(
-                f"消息等级不符合筛选条件: {pump_data.get('level', 'Unknown')}, 当前筛选等级: {self.current_level}"
+                f"消息等级不符合筛选条件: {VVVVVVVVV_data.get('level', 'Unknown')}, 当前筛选等级: {self.current_level}"
             )
             return
         
@@ -266,13 +266,13 @@ class PumpBot:
             try:
                 await self.client.forward_messages(chat_id, event.message)
                 logger.info(
-                    f"已将CA地址 {pump_data.get('ca_address', 'Unknown')} 的消息转发到聊天 {chat_id}"
+                    f"已将CA地址 {VVVVVVVVV_data.get('ca_address', 'Unknown')} 的消息转发到聊天 {chat_id}"
                 )
             except Exception as e:
                 logger.error(f"转发消息失败: {e}")
     
-    def parse_pump_message(self, message_text: str) -> Optional[Dict[str, Any]]:
-        """解析pump消息，提取CA地址和等级等信息"""
+    def parse_VVVVVVVVV_message(self, message_text: str) -> Optional[Dict[str, Any]]:
+        """解析VVVVVVVVV消息，提取CA地址和等级等信息"""
         try:
             # 提取CA地址
             ca_match = re.search(r"🪙CA地址: ([^\s]+)", message_text)
@@ -316,13 +316,13 @@ class PumpBot:
             logger.error(f"解析消息失败: {e}")
             return None
     
-    def should_forward_by_level(self, pump_data: Dict[str, Any]) -> bool:
+    def should_forward_by_level(self, VVVVVVVVV_data: Dict[str, Any]) -> bool:
         """根据等级决定是否应该转发消息"""
         # 如果设置为All，转发所有消息
         if self.current_level == "All":
             return True
         
-        message_level = pump_data.get("level", "Unknown")
+        message_level = VVVVVVVVV_data.get("level", "Unknown")
         
         # 等级优先级: Bad < Normal < Good < Excellent
         level_priority = {
@@ -366,7 +366,7 @@ async def main():
         logger.error("请设置必要的环境变量后再启动程序")
         sys.exit(1)
     
-    bot = PumpBot()
+    bot = VVVVVVVVVBot()
     await bot.start()
 
 if __name__ == "__main__":
