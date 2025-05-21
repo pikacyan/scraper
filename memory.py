@@ -189,15 +189,16 @@ class VVVVVVVVVBot:
             )
             return
 
-        # 转发消息到目标聊天
+        # 获取CA地址
+        ca_address = VVVVVVVVV_data.get("ca_address", "Unknown")
+
+        # 发送CA地址到目标聊天
         for chat_id in self.config["target_chat_ids"]:
             try:
-                await self.client.forward_messages(chat_id, event.message)
-                logger.info(
-                    f"已将CA地址 {VVVVVVVVV_data.get('ca_address', 'Unknown')} 的消息转发到聊天 {chat_id}"
-                )
+                await self.client.send_message(chat_id, ca_address)
+                logger.info(f"已将CA地址 {ca_address} 发送到聊天 {chat_id}")
             except Exception as e:
-                logger.error(f"转发消息失败: {e}")
+                logger.error(f"发送CA地址失败: {e}")
 
     def parse_VVVVVVVVV_message(self, message_text: str) -> Optional[Dict[str, Any]]:
         """解析VVVVVVVVV消息，提取CA地址和等级等信息"""
