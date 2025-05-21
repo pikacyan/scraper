@@ -4,7 +4,7 @@ import sys
 import logging
 import asyncio
 import asyncpg
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 import urllib.parse
 
 from telethon import TelegramClient, events
@@ -79,6 +79,12 @@ class VVVVVVVVVBot:
                 for id in os.environ.get("TELEGRAM_TARGET_CHAT_IDS", "").split(",")
                 if id.strip()
             ],
+            # 监听的特定用户ID列表
+            "watched_user_ids": [
+                int(id.strip())
+                for id in os.environ.get("TELEGRAM_WATCHED_USER_IDS", "").split(",")
+                if id.strip()
+            ],
         }
 
         # 验证必要配置是否存在
@@ -102,6 +108,9 @@ class VVVVVVVVVBot:
         if not self.config["target_chat_ids"]:
             logger.error("未配置目标聊天ID，无法转发消息")
             sys.exit(1)
+
+        if not self.config["watched_user_ids"]:
+            logger.warning("未配置监听的用户ID，将监听群组中所有用户的消息")
 
         logger.info("从环境变量加载配置成功")
 
@@ -225,11 +234,12 @@ class VVVVVVVVVBot:
             "/help - 显示此帮助信息\n\n"
             "可用等级: Bad, Normal, Good, Excellent, All\n"
             "等级说明:\n"
-            "- Bad: 仅转发Bad及以上等级\n"
-            "- Normal: 仅转发Normal及以上等级\n"
-            "- Good: 仅转发Good及以上等级\n"
-            "- Excellent: 仅转发Excellent等级\n"
-            "- All: 转发所有消息，不筛选等级"
+            "- Bad: 仅处理Bad及以上等级\n"
+            "- Normal: 仅处理Normal及以上等级\n"
+            "- Good: 仅处理Good及以上等级\n"
+            "- Excellent: 仅处理Excellent等级\n"
+            "- All: 处理所有消息，不筛选等级\n\n"
+            "机器人现在监听特定用户发送的消息，并将提取到的CA地址发送给目标用户"
         )
         await event.respond(help_text)
 
@@ -251,11 +261,28 @@ class VVVVVVVVVBot:
 
     async def handle_status_command(self, event):
         """处理status命令"""
-        status_text = f"当前筛选等级: {self.current_level}"
+        status_text = (
+            f"当前筛选等级: {self.current_level}\n"
+            f"监听的群组: {len(self.config['source_chat_ids'])}个\n"
+            f"目标接收用户: {len(self.config['target_chat_ids'])}个\n"
+            f"监听的特定用户: {len(self.config['watched_user_ids'])}个"
+        )
         await event.respond(status_text)
 
     async def handle_VVVVVVVVV_message(self, event):
         """处理接收到的VVVVVVVVV消息"""
+        # 获取发送者ID
+        sender = await event.get_sender()
+        sender_id = sender.id
+
+        # 如果配置了要监听的特定用户，则只处理这些用户的消息
+        if (
+            self.config["watched_user_ids"]
+            and sender_id not in self.config["watched_user_ids"]
+        ):
+            logger.debug(f"忽略非监听用户 {sender_id} 的消息")
+            return
+
         message_text = event.message.text
 
         # 尝试解析消息
@@ -272,15 +299,30 @@ class VVVVVVVVVBot:
             )
             return
 
-        # 转发消息到目标聊天
+        # 提取CA地址
+        ca_address = VVVVVVVVV_data.get("ca_address", None)
+        if not ca_address:
+            logger.error("无法从消息中提取CA地址")
+            return
+
+        # 准备发送的消息
+        level_text = VVVVVVVVV_data.get("level", "Unknown")
+        send_text = f"🪙 CA地址: {ca_address}\n📊 等级: {level_text}"
+
+        # 如果有其他需要的信息，可以添加到发送文本中
+        if VVVVVVVVV_data.get("twitter_score", 0) > 0:
+            send_text += f"\nTwitter评分: {VVVVVVVVV_data['twitter_score']}分"
+
+        if VVVVVVVVV_data.get("current_market_value", 0) > 0:
+            send_text += f"\n当前市值: {VVVVVVVVV_data['current_market_value']}K"
+
+        # 发送消息到目标聊天
         for chat_id in self.config["target_chat_ids"]:
             try:
-                await self.client.forward_messages(chat_id, event.message)
-                logger.info(
-                    f"已将CA地址 {VVVVVVVVV_data.get('ca_address', 'Unknown')} 的消息转发到聊天 {chat_id}"
-                )
+                await self.client.send_message(chat_id, send_text)
+                logger.info(f"已将CA地址 {ca_address} 发送到聊天 {chat_id}")
             except Exception as e:
-                logger.error(f"转发消息失败: {e}")
+                logger.error(f"发送消息失败: {e}")
 
     def parse_VVVVVVVVV_message(self, message_text: str) -> Optional[Dict[str, Any]]:
         """解析VVVVVVVVV消息，提取CA地址和等级等信息"""
@@ -328,8 +370,8 @@ class VVVVVVVVVBot:
             return None
 
     def should_forward_by_level(self, VVVVVVVVV_data: Dict[str, Any]) -> bool:
-        """根据等级决定是否应该转发消息"""
-        # 如果设置为All，转发所有消息
+        """根据等级决定是否应该处理消息"""
+        # 如果设置为All，处理所有消息
         if self.current_level == "All":
             return True
 
